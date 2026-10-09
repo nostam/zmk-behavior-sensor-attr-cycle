@@ -114,7 +114,7 @@ static int on_keymap_binding_pressed(struct zmk_behavior_binding *binding,
     const struct behavior_sensor_attr_cycle_config *config = dev->config;
 
     // Update the index, then send the new value to the sensor
-    data->state.index = (data->state.index + binding->param1) % config->length;
+    data->state.index = binding->param1 ? (data->state.index + binding->param1) % config->length : 0;
     struct sensor_value val = { val1: config->values[data->state.index], val2: 0 };
     sensor_attr_set(config->sensor_device, SENSOR_CHAN_ALL, config->attr, &val);
 
