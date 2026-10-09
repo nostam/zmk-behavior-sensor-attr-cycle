@@ -134,7 +134,7 @@ static int on_keymap_binding_released(struct zmk_behavior_binding *binding,
 }
 
 static const struct behavior_driver_api behavior_sensor_attr_cycle_driver_api = {
-    .locality = BEHAVIOR_LOCALITY_EVENT_SOURCE,
+    .locality = BEHAVIOR_LOCALITY_CENTRAL,
     .binding_pressed = on_keymap_binding_pressed,
     .binding_released = on_keymap_binding_released,
 #if IS_ENABLED(CONFIG_ZMK_BEHAVIOR_METADATA)
