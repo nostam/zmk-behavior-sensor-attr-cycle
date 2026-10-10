@@ -27,6 +27,10 @@ properties:
     default: 2000
     type: int
     description: The time to wait before saving to flash.
+  default_index:
+    default: 0
+    type: int
+    description: The index used at power on (without saved state) and by parameter 0 (reset).
   load_delay:
     default: 0
     type: int

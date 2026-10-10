@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: MIT
  */
 #define DT_DRV_COMPAT zmk_behavior_sensor_attr_cycle
+#include <stdlib.h>
 #include <zephyr/device.h>
 #include <drivers/behavior.h>
 #include <zephyr/logging/log.h>
@@ -23,13 +24,14 @@ struct behavior_sensor_attr_cycle_config {
     int32_t save_delay;
     int32_t load_delay;
     bool persistant;
+    uint8_t default_index;
     uint8_t length;
     int32_t values[];
 };
 
 // Everything in here will get stored in flash and persisted if CONFIG_SETTINGS is enabled and correctly configured
 struct behavior_sensor_attr_cycle_persistant_state {
-    uint8_t index;
+    int32_t value;
 };
 
 #if IS_ENABLED(CONFIG_ZMK_BEHAVIOR_METADATA)
@@ -66,7 +68,22 @@ struct behavior_sensor_attr_cycle_data {
     struct k_work_delayable save_work;
 #endif
     struct behavior_sensor_attr_cycle_persistant_state state;
+    uint8_t index;
 };
+
+static uint8_t default_index(const struct behavior_sensor_attr_cycle_config *config) {
+    return MIN(config->default_index, config->length - 1);
+}
+
+static uint8_t nearest_index(const struct behavior_sensor_attr_cycle_config *config, int32_t value) {
+    uint8_t best = 0;
+    for (uint8_t i = 1; i < config->length; i++) {
+        if (abs(config->values[i] - value) < abs(config->values[best] - value)) {
+            best = i;
+        }
+    }
+    return best;
+}
 
 #if IS_ENABLED(CONFIG_SETTINGS)
 
@@ -88,8 +105,14 @@ static void load_work_callback(struct k_work *work) {
     const struct device *dev = data->dev;
     const struct behavior_sensor_attr_cycle_config *config = dev->config;
 
-    struct sensor_value val = { val1: config->values[data->state.index], val2: 0 };
-    sensor_attr_set(config->sensor_device, SENSOR_CHAN_ALL, config->attr, &val);
+    struct sensor_value val = { val1: config->values[data->index], val2: 0 };
+    int err = sensor_attr_set(config->sensor_device, SENSOR_CHAN_ALL, config->attr, &val);
+    if (err < 0) {
+        LOG_WRN("Failed to restore attr %d to %d: %d, retrying", config->attr, val.val1, err);
+        k_work_reschedule(&data->load_work, K_MSEC(500));
+        return;
+    }
+    LOG_INF("Restored attr %d to %d (index %d)", config->attr, val.val1, data->index);
 }
 
 #endif
@@ -98,6 +121,8 @@ static int behavior_sensor_attr_cycle_init(const struct device *dev) {
     struct behavior_sensor_attr_cycle_data *data = dev->data;
     const struct behavior_sensor_attr_cycle_config *config = dev->config;
     data->dev = dev;
+    data->index = default_index(config);
+    data->state.value = config->values[data->index];
     
 #if IS_ENABLED(CONFIG_SETTINGS)
     if (config->persistant) {
@@ -114,9 +139,18 @@ static int on_keymap_binding_pressed(struct zmk_behavior_binding *binding,
     const struct behavior_sensor_attr_cycle_config *config = dev->config;
 
     // Update the index, then send the new value to the sensor
-    data->state.index = binding->param1 ? (data->state.index + binding->param1) % config->length : 0;
-    struct sensor_value val = { val1: config->values[data->state.index], val2: 0 };
-    sensor_attr_set(config->sensor_device, SENSOR_CHAN_ALL, config->attr, &val);
+    int32_t step = (int32_t)binding->param1;
+    int32_t index = step ? CLAMP((int32_t)data->index + step, 0, config->length - 1)
+                         : default_index(config);
+    struct sensor_value val = { val1: config->values[index], val2: 0 };
+    int err = sensor_attr_set(config->sensor_device, SENSOR_CHAN_ALL, config->attr, &val);
+    if (err < 0) {
+        LOG_WRN("Failed to set attr %d to %d: %d", config->attr, val.val1, err);
+        return ZMK_BEHAVIOR_OPAQUE;
+    }
+    LOG_INF("Set attr %d to %d (index %d)", config->attr, val.val1, index);
+    data->index = index;
+    data->state.value = val.val1;
 
 #if IS_ENABLED(CONFIG_SETTINGS)
     if (config->persistant) {
@@ -152,6 +186,7 @@ static const struct behavior_driver_api behavior_sensor_attr_cycle_driver_api = 
         .save_delay = DT_PROP(DT_DRV_INST(n), save_delay),                                         \
         .load_delay = DT_PROP(DT_DRV_INST(n), load_delay),                                         \
         .persistant = DT_PROP(DT_DRV_INST(n), persistant),                                         \
+        .default_index = DT_PROP(DT_DRV_INST(n), default_index),                                   \
         .settings_key = SETTINGS_PREFIX "/" #n,                                                    \
     };                                                                                             \
     BEHAVIOR_DT_INST_DEFINE(n, behavior_sensor_attr_cycle_init, NULL,                              \
@@ -190,15 +225,16 @@ static int sensor_attr_cycle_settings_load_cb(const char *name, size_t len, sett
     }
 
     if (config->persistant) {
+        if (len != sizeof(struct behavior_sensor_attr_cycle_persistant_state)) {
+            LOG_WRN("Ignoring saved state of unexpected size %zu", len);
+            return 0;
+        }
         err = read_cb(cb_arg, &data->state, sizeof(struct behavior_sensor_attr_cycle_persistant_state));
         if (err >= 0) {
-            if (data->state.index >= config->length) {
-                data->state.index = 0;
-            }
-            else {
-                k_work_init_delayable(&data->load_work, load_work_callback);
-                k_work_schedule(&data->load_work, K_MSEC(config->load_delay));
-            }
+            data->index = nearest_index(config, data->state.value);
+            data->state.value = config->values[data->index];
+            k_work_init_delayable(&data->load_work, load_work_callback);
+            k_work_schedule(&data->load_work, K_MSEC(config->load_delay));
         }
         else {
             LOG_ERR("Failed to load settings %d", err);
